@@ -1,0 +1,121 @@
+import gamepad, mbot2, time
+
+MAX_RPM = 80
+DEADZONE = 10
+
+SHOT_POWER = -100     # max shot
+REST_POWER = 100      # rest position
+FIRE_TIME = 0.25      # seconds at -100 (tune this)
+RETURN_TIME = 0.4     # seconds at 100 before cutting to 0 (tune this)
+COOLDOWN = 0.3        # seconds after the sequence before the next shot
+SHOOT_BUTTON = "R1"
+
+GRAB_BUTTON = "N2"    # button 2 -> S1
+GRAB_OPEN = 120
+GRAB_CLOSED = 165
+
+S2_BUTTON = "N3"      # button 3 -> S2
+S2_DEFAULT = 180
+S2_ALT = 0
+
+SEQ_BUTTON = "N4"     # button 4 -> sequence
+# (servo, angle, seconds to wait before the next step) - tune the waits
+SEQ_STEPS = [
+    ("S1", 120, 0.5),
+    ("S1", 165, 0.5),
+    ("S2", 0,   0.7),
+    ("S1", 120, 0.5),
+    ("S2", 180, 0.0),
+]
+
+def apply_deadzone(v):
+    return 0 if abs(v) < DEADZONE else v
+
+last_left = None
+last_right = None
+
+state = "idle"        # idle -> firing -> returning -> idle
+state_start = 0
+last_done = 0
+
+grab_closed = False   # default: open
+grab_was_pressed = False
+
+s2_alt = False        # default: 180
+s2_was_pressed = False
+
+seq_running = False
+seq_index = 0
+seq_next_time = 0
+seq_was_pressed = False
+
+# startup: servos to default, shooter to rest then cut power so it stays quiet
+mbot2.servo_set(GRAB_OPEN, "S1")
+mbot2.servo_set(S2_DEFAULT, "S2")
+mbot2.motor_set(REST_POWER, "M2")
+time.sleep(RETURN_TIME)
+mbot2.motor_set(0, "M2")
+
+while True:
+    left = apply_deadzone(gamepad.get_joystick("Ly"))
+    right = apply_deadzone(gamepad.get_joystick("Ry"))
+
+    if left != last_left:
+        mbot2.EM_set_speed(left * MAX_RPM / 100, "EM1")
+        last_left = left
+    if right != last_right:
+        mbot2.EM_set_speed(-right * MAX_RPM / 100, "EM2")
+        last_right = right
+
+    now = time.time()
+
+    # --- Sequence on button 4 ---
+    seq_pressed = gamepad.is_key_pressed(SEQ_BUTTON)
+    if seq_pressed and not seq_was_pressed and not seq_running:
+        seq_running = True
+        seq_index = 0
+        seq_next_time = now
+    seq_was_pressed = seq_pressed
+
+    if seq_running and now >= seq_next_time:
+        servo, angle, wait = SEQ_STEPS[seq_index]
+        mbot2.servo_set(angle, servo)
+        seq_next_time = now + wait
+        seq_index += 1
+        if seq_index >= len(SEQ_STEPS):
+            seq_running = False
+            grab_closed = False   # S1 ends at 120 (open)
+            s2_alt = False        # S2 ends at 180 (default)
+
+    # --- Grab on S1 (disabled while the sequence runs) ---
+    grab_pressed = gamepad.is_key_pressed(GRAB_BUTTON)
+    if grab_pressed and not grab_was_pressed and not seq_running:
+        grab_closed = not grab_closed
+        mbot2.servo_set(GRAB_CLOSED if grab_closed else GRAB_OPEN, "S1")
+    grab_was_pressed = grab_pressed
+
+    # --- S2: 180 <-> 0 (disabled while the sequence runs) ---
+    s2_pressed = gamepad.is_key_pressed(S2_BUTTON)
+    if s2_pressed and not s2_was_pressed and not seq_running:
+        s2_alt = not s2_alt
+        mbot2.servo_set(S2_ALT if s2_alt else S2_DEFAULT, "S2")
+    s2_was_pressed = s2_pressed
+
+    # --- Shooter on M2: -100% -> 100% -> 0% ---
+    if state == "idle":
+        if gamepad.is_key_pressed(SHOOT_BUTTON) and now - last_done > COOLDOWN:
+            mbot2.motor_set(SHOT_POWER, "M2")     # 1. fire
+            state = "firing"
+            state_start = now
+    elif state == "firing":
+        if now - state_start >= FIRE_TIME:
+            mbot2.motor_set(REST_POWER, "M2")     # 2. return to rest
+            state = "returning"
+            state_start = now
+    elif state == "returning":
+        if now - state_start >= RETURN_TIME:
+            mbot2.motor_set(0, "M2")              # 3. stop, no noise
+            state = "idle"
+            last_done = now
+
+    time.sleep(0.01)
